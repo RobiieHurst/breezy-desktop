@@ -2,6 +2,7 @@ from gi.repository import Gio, GLib, Gtk, GObject
 from .configmanager import ConfigManager
 from .customresolutiondialog import CustomResolutionDialog
 from .displaydistancedialog import DisplayDistanceDialog
+from .desktopenvironment import is_hyprland_available, hyprland_recenter, hyprland_set_plugin_option
 from .extensionsmanager import ExtensionsManager
 from .files import get_state_dir
 from .license import BREEZY_GNOME_FEATURES
@@ -35,11 +36,14 @@ class ConnectedDevice(Gtk.Box):
     display_zoom_on_focus_switch = Gtk.Template.Child()
     display_size_scale = Gtk.Template.Child()
     display_size_adjustment = Gtk.Template.Child()
+    display_distance_row = Gtk.Template.Child()
     follow_threshold_scale = Gtk.Template.Child()
     follow_threshold_adjustment = Gtk.Template.Child()
     follow_mode_switch = Gtk.Template.Child()
     curved_display_switch = Gtk.Template.Child()
     top_features_group = Gtk.Template.Child()
+    hyprland_recenter_row = Gtk.Template.Child()
+    hyprland_recenter_button = Gtk.Template.Child()
     virtual_displays_row = Gtk.Template.Child()
     add_virtual_display_menu = Gtk.Template.Child()
     add_virtual_display_button = Gtk.Template.Child()
@@ -101,6 +105,7 @@ class ConnectedDevice(Gtk.Box):
             self.curved_display_switch,
             self.add_virtual_display_menu,
             self.add_virtual_display_button,
+            self.hyprland_recenter_button,
             self.change_all_displays_distance_button,
             self.change_focused_display_distance_button,
             self.movement_look_ahead_scale,
@@ -121,6 +126,7 @@ class ConnectedDevice(Gtk.Box):
         self.settings.bind('disable-physical-displays', self.disable_physical_displays_switch, 'active', Gio.SettingsBindFlags.DEFAULT)
         self.settings.connect('changed::display-distance', self._handle_display_distance)
         self.settings.bind('display-size', self.display_size_adjustment, 'value', Gio.SettingsBindFlags.DEFAULT)
+        self.settings.connect('changed::display-size', self._handle_hyprland_display_size_changed)
         self.settings.bind('follow-threshold', self.follow_threshold_adjustment, 'value', Gio.SettingsBindFlags.DEFAULT)
         # self.settings.bind('widescreen-mode', self.widescreen_mode_switch, 'active', Gio.SettingsBindFlags.DEFAULT)
         self.settings.bind('curved-display', self.curved_display_switch, 'active', Gio.SettingsBindFlags.DEFAULT)
@@ -174,7 +180,10 @@ class ConnectedDevice(Gtk.Box):
 
         self.add_virtual_display_menu.set_active_id('create_1080p_display')
         self.add_virtual_display_button.connect('clicked', self._on_add_virtual_display)
+        self.hyprland_recenter_button.connect('clicked', self._on_hyprland_recenter_clicked)
         self.launch_display_settings_button.connect('clicked', self._launch_display_settings)
+        self.hyprland_recenter_row.set_visible(is_hyprland_available())
+        self.display_distance_row.set_sensitive(not is_hyprland_available())
 
         self.state_manager = StateManager.get_instance()
         self.state_manager.bind_property('follow-mode', self.follow_mode_switch, 'active', GObject.BindingFlags.DEFAULT)
@@ -202,6 +211,7 @@ class ConnectedDevice(Gtk.Box):
         self.use_optimal_monitor_config_switch.connect('notify::active', self._refresh_use_optimal_monitor_config)
 
         self._handle_switch_enabled_state(self.effect_enable_switch, None)
+        self._handle_hyprland_display_size_changed(self.settings, 'display-size')
         self._handle_display_distance(self.settings, self.settings.get_double('display-distance'))
         self._handle_enabled_features(self.state_manager, None)
         self._handle_device_supports_sbs(self.state_manager, None)
@@ -424,6 +434,21 @@ class ConnectedDevice(Gtk.Box):
 
         logger.info(f"Adding virtual display {resolution}")
         self.virtual_display_manager.create_virtual_display(width, height, 60)
+
+    def _on_hyprland_recenter_clicked(self, *args):
+        try:
+            hyprland_recenter()
+        except Exception as e:
+            logger.error(f"Failed to recenter Hyprland XR desktop: {e}")
+
+    def _handle_hyprland_display_size_changed(self, settings, key):
+        if not is_hyprland_available():
+            return
+
+        try:
+            hyprland_set_plugin_option('screen_scale', settings.get_double('display-size'))
+        except Exception as e:
+            logger.error(f"Failed to set Hyprland XR screen scale: {e}")
 
     def _on_custom_resolution_dialog_add(self, width, height):
         width = int(round(width))

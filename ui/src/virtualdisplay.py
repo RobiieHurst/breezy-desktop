@@ -7,6 +7,7 @@ import signal
 import pydbus
 import gi
 import time
+from .desktopenvironment import is_hyprland_available
     
 gi.require_version('Gst', '1.0')
 from gi.repository import GLib, GObject, Gst
@@ -91,6 +92,9 @@ class VirtualDisplay:
             self.terminate()
 
 def is_screencast_available():
+    if is_hyprland_available():
+        return True
+
     try:
         bus = pydbus.SessionBus()
         screen_cast = bus.get(screen_cast_iface, '/org/gnome/Mutter/ScreenCast')
@@ -109,6 +113,5 @@ def is_screencast_available():
         return False
         
     return True
-
 
 

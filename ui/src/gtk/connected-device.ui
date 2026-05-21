@@ -32,7 +32,7 @@
             <property name="icon-name">applications-system-symbolic</property>
             <property name="child">
               <object class="GtkBox">
-                <property name="orientation">2</property>
+                <property name="orientation">1</property>
                 <property name="margin-start">20</property>
                 <property name="margin-end">20</property>
                 <property name="spacing">20</property>
@@ -94,6 +94,19 @@
                         <property name="subtitle" translatable="yes">Automatically disable all physical displays when the XR effect is enabled.</property>
                         <child>
                           <object class="GtkSwitch" id="disable_physical_displays_switch">
+                            <property name="valign">3</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwActionRow" id="hyprland_recenter_row">
+                        <property name="title" translatable="yes">Recenter XR desktop</property>
+                        <property name="subtitle" translatable="yes">Set the current headset direction as the anchored desktop position.</property>
+                        <property name="visible">0</property>
+                        <child type="suffix">
+                          <object class="GtkButton" id="hyprland_recenter_button">
+                            <property name="label" translatable="yes">Recenter</property>
                             <property name="valign">3</property>
                           </object>
                         </child>
@@ -576,7 +589,7 @@
             <property name="icon-name">applications-system-symbolic</property>
             <property name="child">
               <object class="GtkBox">
-                <property name="orientation">2</property>
+                <property name="orientation">1</property>
                 <property name="margin-start">20</property>
                 <property name="margin-end">20</property>
                 <property name="spacing">20</property>

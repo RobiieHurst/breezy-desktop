@@ -2,6 +2,7 @@ import sys
 from gi.repository import GObject, GLib
 from .time import LICENSE_WARN_SECONDS
 from .xrdriveripc import XRDriverIPC
+from .desktopenvironment import is_hyprland
 
 # shouldn't need a number larger than a year
 LICENSE_ACTION_NEEDED_MAX = 60 * 60 * 24 * 366
@@ -50,6 +51,13 @@ class StateManager(GObject.GObject):
     def __init__(self):
         GObject.GObject.__init__(self)
         self.ipc = XRDriverIPC.get_instance()
+        if is_hyprland():
+            try:
+                self.ipc.write_control_flags({
+                    'request_features': 'productivity,productivity_pro'
+                })
+            except Exception:
+                pass
         self.driver_running = False
         self.follow_mode = False
         self.follow_threshold = 15.0

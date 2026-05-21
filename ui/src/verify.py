@@ -3,10 +3,14 @@ import os
 import subprocess
 
 from .files import get_bin_home
+from .desktopenvironment import is_hyprland_available
 
 logger = logging.getLogger('breezy_ui')
 
 def verify_installation():
+    if is_hyprland_available():
+        return True
+
     verify_installation_path = os.path.join(get_bin_home(), 'breezy_gnome_verify')
 
     if not os.path.exists(verify_installation_path):

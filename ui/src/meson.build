@@ -42,6 +42,7 @@ breezydesktop_sources = [
   'connecteddevice.py',
   'customresolutiondialog.py',
   'customresolutiondialogcontent.py',
+  'desktopenvironment.py',
   'extensionsmanager.py',
   'displaydistancedialog.py',
   'displaydistancedialogcontent.py',
@@ -64,6 +65,7 @@ breezydesktop_sources = [
   'updatechecker.py',
   'virtualdisplay.py',
   'virtualdisplaymanager.py',
+  'virtualdisplayrow.py',
   'verify.py',
   'window.py'
 ]

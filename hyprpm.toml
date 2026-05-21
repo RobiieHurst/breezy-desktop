@@ -1,0 +1,7 @@
+[breezy-desktop]
+description = "Breezy Desktop XR compositor plugin for Hyprland"
+authors = ["wheaney"]
+output = "hyprland/build/libbreezy-hyprland.so"
+build = [
+    "make -C hyprland all"
+]

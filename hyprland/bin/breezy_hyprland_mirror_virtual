@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+SUPPORTED_MODELS = {
+    'viture',
+    'nreal air',
+    'air',
+    'air 2',
+    'air 2 pro',
+    'air 2 ultra',
+    'one',
+    'one pro',
+    'xreal one',
+    'xreal one pro',
+    'xreal 1s',
+    'smartglasses',
+    'rayneo air 4 pro',
+    'rayneo air 3s',
+    'rayneo air 3',
+    'rayneo air 2',
+    'rokid max',
+    'rokid max 2',
+    'rokid air',
+}
+
+STATE_PATH = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state')) / 'breezy_hyprland_mirror.json'
+
+
+def hyprctl(*args):
+    hyprctl_path = shutil.which('hyprctl')
+    if not hyprctl_path:
+        raise RuntimeError('hyprctl not found')
+
+    return subprocess.check_output([hyprctl_path, *args], text=True)
+
+
+def monitors(all_monitors=False):
+    args = ['monitors']
+    if all_monitors:
+        args.append('all')
+    args.append('-j')
+    return json.loads(hyprctl(*args))
+
+
+def is_headset(monitor):
+    model = monitor.get('model', '').lower()
+    description = monitor.get('description', '').lower()
+    return model in SUPPORTED_MODELS or any(product in description for product in SUPPORTED_MODELS if len(product) > 3)
+
+
+def find_headset(monitors_list):
+    return next((monitor for monitor in monitors_list if is_headset(monitor)), None)
+
+
+def find_virtual(monitors_list):
+    return next((monitor for monitor in monitors_list if monitor.get('name', '').startswith('breezy-virtual')), None)
+
+
+def current_monitor_spec(monitor):
+    refresh = round(float(monitor.get('refreshRate', 60)), 2)
+    return f"{monitor['width']}x{monitor['height']}@{refresh},{monitor['x']}x{monitor['y']},{monitor['scale']}"
+
+
+def save_state(headset):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(json.dumps({
+        'headset': headset['name'],
+        'spec': current_monitor_spec(headset),
+    }))
+
+
+def load_state():
+    if not STATE_PATH.exists():
+        return None
+    return json.loads(STATE_PATH.read_text())
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Mirror a Breezy Hyprland virtual display onto XR glasses.')
+    parser.add_argument('--undo', action='store_true', help='Stop mirroring and restore the headset monitor placement.')
+    args = parser.parse_args()
+
+    monitors_list = monitors(args.undo)
+    headset = find_headset(monitors_list)
+
+    if args.undo:
+        state = load_state()
+        if state:
+            hyprctl('keyword', 'monitor', f"{state['headset']},{state['spec']}")
+            STATE_PATH.unlink(missing_ok=True)
+            print(f"Stopped mirroring on {state['headset']}.")
+            return 0
+
+        if not headset:
+            print('No supported headset monitor found.', file=sys.stderr)
+            return 1
+
+        hyprctl('keyword', 'monitor', f"{headset['name']},{current_monitor_spec(headset)}")
+        print(f"Stopped mirroring on {headset['name']}.")
+        return 0
+
+    if not headset:
+        print('No supported headset monitor found.', file=sys.stderr)
+        return 1
+
+    virtual = find_virtual(monitors_list)
+    if not virtual:
+        print('No Breezy virtual monitor found. Add a virtual display first.', file=sys.stderr)
+        return 1
+
+    save_state(headset)
+    hyprctl('keyword', 'monitor', f"{headset['name']},preferred,auto,1,mirror,{virtual['name']}")
+    print(f"Mirroring {virtual['name']} onto {headset['name']}.")
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
