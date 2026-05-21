@@ -4,6 +4,41 @@ This is the Hyprland compositor plugin backend for Breezy Desktop.
 
 Current status: early scaffold. The plugin loads, verifies Hyprland plugin API compatibility, checks `/dev/shm/breezy_desktop_imu` for XR pose data, discovers Hyprland monitors/headless outputs, and posts load/unload notifications. XR rendering will be added incrementally.
 
+## Quick Development Workflow
+
+From the repository root, use the helper for the common Hyprland testing loop:
+
+```bash
+hyprland/bin/breezy_hyprland_dev reload
+```
+
+That builds the plugin, unloads any previous copy, loads the new copy, and recenters XR anchoring.
+
+Launch the local UI with:
+
+```bash
+hyprland/bin/breezy_hyprland_dev ui
+```
+
+Build/reload the plugin and then launch the UI with:
+
+```bash
+hyprland/bin/breezy_hyprland_dev all
+```
+
+Other useful commands:
+
+```bash
+hyprland/bin/breezy_hyprland_dev build-plugin
+hyprland/bin/breezy_hyprland_dev build-plugin --debug
+hyprland/bin/breezy_hyprland_dev load
+hyprland/bin/breezy_hyprland_dev unload
+hyprland/bin/breezy_hyprland_dev recenter
+hyprland/bin/breezy_hyprland_dev build-ui
+```
+
+The UI helper installs to `.local-test` by default. Override paths with `BREEZY_UI_BUILD_DIR` and `BREEZY_UI_PREFIX` if needed.
+
 ## Build
 
 ```bash

@@ -56,6 +56,19 @@ struct PoseOffset {
     double y = 0.0;
 };
 
+struct Quat {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double w = 1.0;
+};
+
+struct Vec3 {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
 SessionState g_session;
 std::string g_lastSessionFingerprint;
 CHyprSignalListener g_renderPreListener;
@@ -73,8 +86,7 @@ Vector2D g_virtualMonitorTextureSize;
 std::string g_fakeMirrorSourceName;
 std::string g_fakeMirrorTargetName;
 bool g_poseBaselineSet = false;
-double g_poseBaselineYaw = 0.0;
-double g_poseBaselinePitch = 0.0;
+Quat g_poseBaseline;
 bool g_poseOffsetInitialized = false;
 PoseOffset g_smoothedPoseOffset;
 
@@ -110,10 +122,27 @@ void logDebug(const std::string& message) {
 
 void resetPoseFilter() {
     g_poseBaselineSet = false;
-    g_poseBaselineYaw = 0.0;
-    g_poseBaselinePitch = 0.0;
+    g_poseBaseline = {};
     g_poseOffsetInitialized = false;
     g_smoothedPoseOffset = {};
+}
+
+Quat quatConjugate(const Quat& q) {
+    return {.x = -q.x, .y = -q.y, .z = -q.z, .w = q.w};
+}
+
+Quat quatMultiply(const Quat& a, const Quat& b) {
+    return {
+        .x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        .y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        .z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        .w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    };
+}
+
+Vec3 rotateVector(const Vec3& v, const Quat& q) {
+    const Quat rotated = quatMultiply(quatMultiply(q, {.x = v.x, .y = v.y, .z = v.z, .w = 0.0}), quatConjugate(q));
+    return {.x = rotated.x, .y = rotated.y, .z = rotated.z};
 }
 
 double configFloat(const std::string& name, const double fallback) {
@@ -229,51 +258,45 @@ PoseOffset currentPoseOffset(PHLMONITOR target, PHLMONITOR source, const CBox& b
         return {};
 
     const auto pose = readPoseData();
+    if (pose && !pose->enabled) {
+        resetPoseFilter();
+        return {};
+    }
+
     if (!pose || !pose->valid)
         return g_poseOffsetInitialized ? g_smoothedPoseOffset : PoseOffset{};
 
     const auto* q = pose->orientationNwu;
-    const double x = -q[1];
-    const double y = q[2];
-    const double z = -q[0];
-    const double w = q[3];
-
-    const double sinPitch = std::clamp(2.0 * (w * x - z * y), -1.0, 1.0);
-    const double pitch = std::asin(sinPitch);
-    const double yaw = std::atan2(2.0 * (w * y + x * z), 1.0 - 2.0 * (x * x + y * y));
+    const Quat current{
+        .x = -q[1],
+        .y = q[2],
+        .z = -q[0],
+        .w = q[3],
+    };
 
     if (!g_poseBaselineSet) {
         g_poseBaselineSet = true;
-        g_poseBaselineYaw = yaw;
-        g_poseBaselinePitch = pitch;
+        g_poseBaseline = current;
     }
 
-    auto angleDelta = [](double current, double baseline) {
-        double delta = current - baseline;
-        while (delta > BREEZY_PI)
-            delta -= BREEZY_PI * 2.0;
-        while (delta < -BREEZY_PI)
-            delta += BREEZY_PI * 2.0;
-        return delta;
-    };
-
-    const double relativeYaw = angleDelta(yaw, g_poseBaselineYaw);
-    const double relativePitch = angleDelta(pitch, g_poseBaselinePitch);
+    const Quat relative = quatMultiply(quatConjugate(current), g_poseBaseline);
+    const Vec3 anchorDirection = rotateVector({.x = 0.0, .y = 0.0, .z = -1.0}, relative);
 
     const double diagonalFovRadians = std::clamp(static_cast<double>(pose->diagonalFov), 1.0, 179.0) * BREEZY_PI / 180.0;
     const double aspect = source->m_transformedSize.x / source->m_transformedSize.y;
     const double diagonalHalfTangent = std::tan(diagonalFovRadians / 2.0);
     const double verticalHalfTangent = diagonalHalfTangent / std::sqrt((aspect * aspect) + 1.0);
     const double horizontalHalfTangent = verticalHalfTangent * aspect;
+    const double depth = std::max(-anchorDirection.z, 0.001);
 
     const double movementLimit = configFloat(CONFIG_MOVEMENT_LIMIT, DEFAULT_POSE_NORMALIZED_LIMIT);
-    const double normalizedX = applyDeadzone(std::clamp(std::tan(relativeYaw) / horizontalHalfTangent, -movementLimit, movementLimit));
-    const double normalizedY = applyDeadzone(std::clamp(std::tan(relativePitch) / verticalHalfTangent, -movementLimit, movementLimit));
+    const double normalizedX = applyDeadzone(std::clamp((anchorDirection.x / depth) / horizontalHalfTangent, -movementLimit, movementLimit));
+    const double normalizedY = applyDeadzone(std::clamp((anchorDirection.y / depth) / verticalHalfTangent, -movementLimit, movementLimit));
 
     (void)target;
     const PoseOffset targetOffset{
         .x = normalizedX * target->m_transformedSize.x * 0.5,
-        .y = -normalizedY * target->m_transformedSize.y * 0.5,
+        .y = normalizedY * target->m_transformedSize.y * 0.5,
     };
     return smoothPoseOffset(targetOffset, box);
 }

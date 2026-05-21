@@ -322,6 +322,20 @@ class ConnectedDevice(Gtk.Box):
         
         if requesting_enabled: 
             self._refresh_follow_mode(self.follow_mode_switch, None)
+            if is_hyprland_available():
+                GLib.timeout_add(250, self._recenter_hyprland_after_enable)
+
+    def _recenter_hyprland_after_enable(self):
+        try:
+            self.ipc.write_control_flags({
+                'recalibrate': True,
+                'recenter_screen': True,
+            })
+            hyprland_recenter()
+        except Exception as e:
+            logger.error(f"Failed to recalibrate Hyprland XR desktop after enabling: {e}")
+
+        return False
 
     def _refresh_follow_mode(self, switch, param):
         if (self.state_manager.get_property('follow-mode') == switch.get_active()):

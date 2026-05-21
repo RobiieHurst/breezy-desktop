@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." >/dev/null 2>&1 && pwd)
+PLUGIN_PATH="$REPO_ROOT/hyprland/build/libbreezy-hyprland.so"
+UI_BUILD_DIR="${BREEZY_UI_BUILD_DIR:-/tmp/opencode/breezy-ui-build}"
+UI_PREFIX="${BREEZY_UI_PREFIX:-$REPO_ROOT/.local-test}"
+
+usage() {
+  cat <<EOF
+Usage: hyprland/bin/breezy_hyprland_dev <command> [args]
+
+Commands:
+  build-plugin [--debug]  Build the Hyprland plugin
+  load                   Load the built Hyprland plugin
+  unload                 Unload the Hyprland plugin if loaded
+  reload [--debug]       Build, unload, load, and recenter the plugin
+  recenter               Recenter Breezy XR anchoring
+  build-ui               Build and install the UI to .local-test
+  ui [-- <args>]         Build if needed, then launch the local UI
+  all [--debug]          Reload the plugin, then launch the local UI
+
+Environment:
+  BREEZY_UI_BUILD_DIR    UI build directory (default: /tmp/opencode/breezy-ui-build)
+  BREEZY_UI_PREFIX       UI install prefix (default: <repo>/.local-test)
+EOF
+}
+
+need_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'Missing required command: %s\n' "$1" >&2
+    exit 1
+  fi
+}
+
+debug_make_arg() {
+  if [[ "${1:-}" == "--debug" ]]; then
+    printf 'DEBUG=1'
+  fi
+}
+
+build_plugin() {
+  local debug_arg
+  debug_arg=$(debug_make_arg "${1:-}")
+  if [[ -n "$debug_arg" ]]; then
+    make -C "$REPO_ROOT/hyprland" clean all "$debug_arg"
+  else
+    make -C "$REPO_ROOT/hyprland" clean all
+  fi
+}
+
+load_plugin() {
+  need_command hyprctl
+  if [[ ! -f "$PLUGIN_PATH" ]]; then
+    build_plugin
+  fi
+  hyprctl plugin load "$PLUGIN_PATH"
+}
+
+unload_plugin() {
+  need_command hyprctl
+  hyprctl plugin unload "$PLUGIN_PATH" >/dev/null 2>&1 || true
+}
+
+recenter() {
+  need_command hyprctl
+  hyprctl breezy-recenter
+}
+
+reload_plugin() {
+  build_plugin "${1:-}"
+  unload_plugin
+  load_plugin
+  recenter
+}
+
+build_ui() {
+  need_command meson
+  meson setup "$UI_BUILD_DIR" "$REPO_ROOT/ui" --wipe --prefix "$UI_PREFIX"
+  meson compile -C "$UI_BUILD_DIR"
+  meson install -C "$UI_BUILD_DIR"
+}
+
+run_ui() {
+  if [[ ! -x "$UI_PREFIX/bin/breezydesktop" ]]; then
+    build_ui
+  fi
+
+  APPDIR="$UI_PREFIX/share" \
+  XDG_DATA_DIRS="$UI_PREFIX/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" \
+  PATH="$UI_PREFIX/bin:$PATH" \
+  "$UI_PREFIX/bin/breezydesktop" --skip-verification "$@"
+}
+
+command_name="${1:-}"
+if [[ -z "$command_name" || "$command_name" == "-h" || "$command_name" == "--help" ]]; then
+  usage
+  exit 0
+fi
+shift || true
+
+case "$command_name" in
+  build-plugin)
+    build_plugin "${1:-}"
+    ;;
+  load)
+    load_plugin
+    ;;
+  unload)
+    unload_plugin
+    ;;
+  reload)
+    reload_plugin "${1:-}"
+    ;;
+  recenter)
+    recenter
+    ;;
+  build-ui)
+    build_ui
+    ;;
+  ui)
+    if [[ "${1:-}" == "--" ]]; then
+      shift
+    fi
+    run_ui "$@"
+    ;;
+  all)
+    reload_plugin "${1:-}"
+    run_ui
+    ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$command_name" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

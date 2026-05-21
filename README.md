@@ -68,7 +68,7 @@ Breezy Desktop has best compatibility with GNOME versions 45 through 49.
 
 **IMPORTANT** - Please read carefully through this list before you get started
 * **Make sure your glasses are in the [supported devices list](https://github.com/wheaney/XRLinuxDriver#supported-devices)** and are on the latest firmware.
-* **If this is the first time you're using your glasses with GNOME**, make sure your glasses are extending your workspace and not just mirroring your primary monitor by opening up the `Displays` settings dialog and choosing the `Join` option for multiple displays. 
+* **If this is the first time you're using your glasses with GNOME**, make sure your glasses are extending your workspace and not just mirroring your primary monitor by opening up the `Displays` settings dialog and choosing the `Join` option for multiple displays.
 * **If you're running `GNOME on Xorg`**, you won't be able to launch virtual displays unless you switch to `Wayland`.
 * **If you're using XREAL Ones** or other glasses that provide built-in 3DoF/stabilization/anchoring features (e.g. VITURE Beast), you must disable ALL such features first, using the menu on the glasses.
 
@@ -201,7 +201,7 @@ Features currently offered:
 
 #### Unlocking Supporter Tier
 
-If you donate at least $10, you should immediately receive an email (to your Ko-fi email address) with a verification token. If you don't, request it using the config script: 
+If you donate at least $10, you should immediately receive an email (to your Ko-fi email address) with a verification token. If you don't, request it using the config script:
 ```bash
 xr_driver_cli --request-token [emailAddress]
 ```
@@ -238,7 +238,7 @@ Your right to privacy and the protection of your personal data are baked into ev
 In order to provide you with Supporter Tier features, this application and its backend services have to collect the following pieces of personal information:
 
 * Your email address is sent to this application's backend server from either the payment vendor (Ko-fi) or from your device (at your request). Your email address may be used immediately upon receipt in its unaltered form to send you a transactional email, but it is then hashed prior to storage. The unaltered form of your email address is never stored and can no longer be referenced. The hashed value is stored for later reference.
-  * Other personal data may be sent from the payment vendor, but is never utilized nor stored. 
+  * Other personal data may be sent from the payment vendor, but is never utilized nor stored.
 * Your device's MAC address is hashed on your device. It never leaves your device in its original, unaltered form. The hashed value is sent to this application's backend server and stored for later reference.
 
 Hashing functions are a one-way process that serve to anonymize your personal data by irreversibly changing them. Once hashed, they can never be unhashed or traced back to their original values.
