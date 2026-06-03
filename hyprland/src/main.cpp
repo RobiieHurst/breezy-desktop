@@ -7,18 +7,20 @@
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/ClearPassElement.hpp>
-#include <hyprland/src/render/pass/TexPassElement.hpp>
 
 #include "monitor_discovery.hpp"
 #include "pose_data.hpp"
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #ifndef BREEZY_DESKTOP_VERSION_STR
 #define BREEZY_DESKTOP_VERSION_STR "dev"
@@ -85,6 +87,10 @@ uint64_t g_virtualTextureRenderHits = 0;
 uint64_t g_mirrorSaveChecks = 0;
 SP<Render::ITexture> g_virtualMonitorTexture;
 Vector2D g_virtualMonitorTextureSize;
+GLuint g_curvedMeshProgram = 0;
+GLuint g_curvedMeshVao = 0;
+GLuint g_curvedMeshVbo = 0;
+GLint g_curvedMeshTextureUniform = -1;
 std::string g_fakeMirrorSourceName;
 std::string g_fakeMirrorTargetName;
 bool g_poseBaselineSet = false;
@@ -105,10 +111,13 @@ constexpr double DEFAULT_DRIFT_STILLNESS_RADIANS = 0.002;
 constexpr double DEFAULT_DRIFT_CORRECTION_ZONE = 0.25;
 constexpr int DRIFT_STILL_FRAMES_REQUIRED = 30;
 constexpr double DEFAULT_XR_SCREEN_SCALE = 0.95;
+constexpr double DEFAULT_XR_CURVATURE = 0.0;
 constexpr double XR_CENTERED_THRESHOLD = 0.35;
+constexpr int CURVED_TEXTURE_SEGMENTS = 128;
 constexpr const char* RECENTER_DISPATCHER = "breezy_recenter";
 constexpr const char* RECENTER_HYPRCTL_COMMAND = "breezy-recenter";
 constexpr const char* CONFIG_SCREEN_SCALE = "plugin:breezy:screen_scale";
+constexpr const char* CONFIG_CURVATURE = "plugin:breezy:curvature";
 constexpr const char* CONFIG_SMOOTHING_ALPHA = "plugin:breezy:smoothing_alpha";
 constexpr const char* CONFIG_MAX_STEP_RATIO = "plugin:breezy:max_step_ratio";
 constexpr const char* CONFIG_DEADZONE = "plugin:breezy:deadzone";
@@ -203,6 +212,7 @@ double configFloat(const std::string& name, const double fallback) {
 
 void addConfigValues() {
     HyprlandAPI::addConfigValue(PHANDLE, CONFIG_SCREEN_SCALE, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_XR_SCREEN_SCALE)));
+    HyprlandAPI::addConfigValue(PHANDLE, CONFIG_CURVATURE, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_XR_CURVATURE)));
     HyprlandAPI::addConfigValue(PHANDLE, CONFIG_SMOOTHING_ALPHA, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_POSE_SMOOTHING_ALPHA)));
     HyprlandAPI::addConfigValue(PHANDLE, CONFIG_MAX_STEP_RATIO, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_POSE_MAX_STEP_RATIO)));
     HyprlandAPI::addConfigValue(PHANDLE, CONFIG_DEADZONE, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_POSE_NORMALIZED_DEADZONE)));
@@ -602,6 +612,225 @@ void recenterPose(const bool showNotification = true) {
         notify("[Breezy Desktop] XR view recentered", CHyprColor{0.2, 0.8, 1.0, 1.0}, 2500);
 }
 
+struct CurvedMeshVertex {
+    GLfloat x;
+    GLfloat y;
+    GLfloat u;
+    GLfloat v;
+};
+
+bool compileCurvedMeshShader(GLuint shader, const char* source) {
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+
+    GLint ok = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (ok == GL_TRUE)
+        return true;
+
+#ifdef BREEZY_HYPRLAND_DEBUG
+    std::array<GLchar, 1024> error{};
+    GLsizei length = 0;
+    glGetShaderInfoLog(shader, error.size(), &length, error.data());
+    logDebug("curved mesh shader compile failed: " + std::string(error.data(), static_cast<size_t>(length)));
+#endif
+    return false;
+}
+
+bool ensureCurvedMeshProgram() {
+    if (g_curvedMeshProgram != 0)
+        return true;
+
+    constexpr const char* vertexShaderSource = R"glsl(
+#version 320 es
+precision highp float;
+layout(location = 0) in vec2 position;
+layout(location = 1) in vec2 uv;
+out vec2 vUv;
+void main() {
+    vUv = uv;
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+)glsl";
+
+    constexpr const char* fragmentShaderSource = R"glsl(
+#version 320 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D sourceTexture;
+out vec4 fragColor;
+void main() {
+    fragColor = texture(sourceTexture, vUv);
+}
+)glsl";
+
+    const GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    const GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    if (!compileCurvedMeshShader(vertexShader, vertexShaderSource) || !compileCurvedMeshShader(fragmentShader, fragmentShaderSource)) {
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+        return false;
+    }
+
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    GLint ok = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok != GL_TRUE) {
+#ifdef BREEZY_HYPRLAND_DEBUG
+        std::array<GLchar, 1024> error{};
+        GLsizei length = 0;
+        glGetProgramInfoLog(program, error.size(), &length, error.data());
+        logDebug("curved mesh shader link failed: " + std::string(error.data(), static_cast<size_t>(length)));
+#endif
+        glDeleteProgram(program);
+        return false;
+    }
+
+    g_curvedMeshProgram = program;
+    g_curvedMeshTextureUniform = glGetUniformLocation(g_curvedMeshProgram, "sourceTexture");
+    glGenVertexArrays(1, &g_curvedMeshVao);
+    glGenBuffers(1, &g_curvedMeshVbo);
+    return true;
+}
+
+void drawCurvedMeshTexture(SP<Render::ITexture> texture, const CBox& box, const double curvature) {
+    auto monitor = g_pHyprRenderer && g_pHyprRenderer->m_renderData.pMonitor ? g_pHyprRenderer->m_renderData.pMonitor.lock() : nullptr;
+    if (!monitor || !texture || texture->m_texID == 0 || !ensureCurvedMeshProgram())
+        return;
+
+    const double clampedCurvature = std::clamp(curvature, 0.0, 1.0);
+    const bool flat = clampedCurvature <= 0.001;
+    const double maxAngle = flat ? 0.0 : std::clamp(clampedCurvature * (BREEZY_PI / 2.0), 0.001, 1.25);
+    const double centerX = box.x + (box.w / 2.0);
+    const double centerY = box.y + (box.h / 2.0);
+    const double wrapWidth = box.w * (1.0 + (clampedCurvature * 0.6));
+    const double halfWidth = wrapWidth / 2.0;
+    const double viewportW = std::max(monitor->m_transformedSize.x, 1.0);
+    const double viewportH = std::max(monitor->m_transformedSize.y, 1.0);
+
+    auto projectedX = [&](const double normalized) {
+        if (flat)
+            return centerX + halfWidth * normalized;
+
+        const double sinMaxAngle = std::sin(maxAngle);
+        if (std::abs(sinMaxAngle) < 0.001)
+            return centerX + halfWidth * normalized;
+        return centerX + halfWidth * (std::sin(normalized * maxAngle) / sinMaxAngle);
+    };
+
+    auto toNdcX = [&](const double x) {
+        return static_cast<GLfloat>((x / viewportW) * 2.0 - 1.0);
+    };
+    auto toNdcY = [&](const double y) {
+        return static_cast<GLfloat>(1.0 - (y / viewportH) * 2.0);
+    };
+
+    std::vector<CurvedMeshVertex> vertices;
+    vertices.reserve((CURVED_TEXTURE_SEGMENTS + 1) * 2);
+    for (int i = 0; i <= CURVED_TEXTURE_SEGMENTS; ++i) {
+        const double u = static_cast<double>(i) / CURVED_TEXTURE_SEGMENTS;
+        const double normalized = (u * 2.0) - 1.0;
+        const double x = projectedX(normalized);
+        const double y0 = centerY - (box.h / 2.0);
+        const double y1 = centerY + (box.h / 2.0);
+
+        vertices.push_back({toNdcX(x), toNdcY(y0), static_cast<GLfloat>(u), 1.0F});
+        vertices.push_back({toNdcX(x), toNdcY(y1), static_cast<GLfloat>(u), 0.0F});
+    }
+
+    GLint previousProgram = 0;
+    GLint previousVao = 0;
+    GLint previousArrayBuffer = 0;
+    GLint previousTexture = 0;
+    GLint previousActiveTexture = 0;
+    GLboolean blendEnabled = glIsEnabled(GL_BLEND);
+    GLboolean scissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &previousProgram);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previousVao);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &previousArrayBuffer);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &previousActiveTexture);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+
+    glDisable(GL_BLEND);
+    glDisable(GL_SCISSOR_TEST);
+    glUseProgram(g_curvedMeshProgram);
+    glUniform1i(g_curvedMeshTextureUniform, 0);
+    glBindTexture(GL_TEXTURE_2D, texture->m_texID);
+    glBindVertexArray(g_curvedMeshVao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_curvedMeshVbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(CurvedMeshVertex)), vertices.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(CurvedMeshVertex), reinterpret_cast<void*>(offsetof(CurvedMeshVertex, x)));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(CurvedMeshVertex), reinterpret_cast<void*>(offsetof(CurvedMeshVertex, u)));
+    glEnableVertexAttribArray(1);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, static_cast<GLsizei>(vertices.size()));
+
+    glBindBuffer(GL_ARRAY_BUFFER, previousArrayBuffer);
+    glBindVertexArray(previousVao);
+    glBindTexture(GL_TEXTURE_2D, previousTexture);
+    glActiveTexture(previousActiveTexture);
+    glUseProgram(previousProgram);
+    if (blendEnabled)
+        glEnable(GL_BLEND);
+    else
+        glDisable(GL_BLEND);
+    if (scissorEnabled)
+        glEnable(GL_SCISSOR_TEST);
+    else
+        glDisable(GL_SCISSOR_TEST);
+}
+
+class CurvedTexturePassElement : public IPassElement {
+  public:
+    CurvedTexturePassElement(SP<Render::ITexture> texture, const CBox& box, const double curvature) :
+        m_texture(texture), m_box(box), m_curvature(std::clamp(curvature, 0.0, 1.0)) {}
+
+    std::vector<UP<IPassElement>> draw() override {
+        std::vector<UP<IPassElement>> elements;
+        if (!m_texture || m_box.w <= 0 || m_box.h <= 0)
+            return elements;
+
+        drawCurvedMeshTexture(m_texture, m_box, m_curvature);
+        return elements;
+    }
+
+    bool needsLiveBlur() override {
+        return false;
+    }
+
+    bool needsPrecomputeBlur() override {
+        return false;
+    }
+
+    const char* passName() override {
+        return "BreezyCurvedTexture";
+    }
+
+    ePassElementType type() override {
+        return EK_CUSTOM;
+    }
+
+    std::optional<CBox> boundingBox() override {
+        return m_box;
+    }
+
+    bool disableSimplification() override {
+        return true;
+    }
+
+  private:
+    SP<Render::ITexture> m_texture;
+    CBox m_box;
+    double m_curvature = 0.0;
+};
+
 void cacheVirtualMonitorTexture() {
     auto monitor = g_currentRenderMonitor.lock();
     if (!isVirtualRenderMonitor(monitor) || !g_pHyprRenderer)
@@ -702,19 +931,15 @@ void renderVirtualMonitorTexture() {
     box.y = (monitor->m_transformedSize.y - box.h) / 2.0;
     const auto offset = currentPoseOffset(monitor, mirrored, box);
     box.x += offset.x;
-    box.y -= offset.y;
+    box.y += offset.y;
 
     g_pHyprRenderer->m_renderPass.add(Hyprutils::Memory::makeUnique<CClearPassElement>(CClearPassElement::SClearData{CHyprColor(0, 0, 0, 1.0)}));
 
-    CTexPassElement::SRenderData data;
-    data.tex = g_virtualMonitorTexture;
-    data.tex->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    data.tex->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    data.box = box;
-    data.a = 1.0F;
-    data.damage = CRegion(box);
+    g_virtualMonitorTexture->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    g_virtualMonitorTexture->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    g_pHyprRenderer->m_renderPass.add(Hyprutils::Memory::makeUnique<CTexPassElement>(std::move(data)));
+    const double curvature = std::clamp(configFloat(CONFIG_CURVATURE, DEFAULT_XR_CURVATURE), 0.0, 1.0);
+    g_pHyprRenderer->m_renderPass.add(Hyprutils::Memory::makeUnique<CurvedTexturePassElement>(g_virtualMonitorTexture, box, curvature));
     scheduleActiveXrFrames(monitor, mirrored);
 }
 
