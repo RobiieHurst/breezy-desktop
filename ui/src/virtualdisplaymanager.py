@@ -110,7 +110,8 @@ class VirtualDisplayManager(GObject.GObject):
             self.displays.append({
                 'pid': process.pid,
                 'width': width,
-                'height': height
+                'height': height,
+                'framerate': framerate
             })
             self.set_property('displays', self.displays)
             self._save_processes()
@@ -157,7 +158,8 @@ class VirtualDisplayManager(GObject.GObject):
                 'backend': 'hyprland',
                 'pid': name,
                 'width': width,
-                'height': height
+                'height': height,
+                'framerate': framerate
             })
             self.set_property('displays', self.displays)
             self._save_processes()

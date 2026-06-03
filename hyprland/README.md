@@ -81,8 +81,11 @@ The plugin exposes tuning values through Hyprland config. These defaults match t
 plugin:breezy:screen_scale = 0.95
 plugin:breezy:smoothing_alpha = 0.45
 plugin:breezy:max_step_ratio = 0.35
-plugin:breezy:deadzone = 0.01
+plugin:breezy:deadzone = 0.03
 plugin:breezy:movement_limit = 6.0
+plugin:breezy:drift_correction_alpha = 0.001
+plugin:breezy:drift_stillness_radians = 0.002
+plugin:breezy:drift_correction_zone = 0.25
 ```
 
 Reload Hyprland config after changing values.

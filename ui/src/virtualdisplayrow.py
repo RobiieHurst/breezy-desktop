@@ -23,7 +23,7 @@ class VirtualDisplayRow(Adw.ActionRow):
         self.add_prefix(icon)
         self.add_prefix(Gtk.Label(label="  "))
 
-        self.set_subtitle(f"{width} x {height}")
+        self.set_subtitle(f"{width} x {height} @ {framerate} Hz")
 
         self.remove_virtual_display_button.connect('clicked', self._remove_virtual_display)
 

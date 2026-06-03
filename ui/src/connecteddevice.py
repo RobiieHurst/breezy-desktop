@@ -446,8 +446,9 @@ class ConnectedDevice(Gtk.Box):
             width = int(width)
             height = int(height)
 
-        logger.info(f"Adding virtual display {resolution}")
-        self.virtual_display_manager.create_virtual_display(width, height, 60)
+        framerate = 120 if is_hyprland_available() else 60
+        logger.info(f"Adding virtual display {resolution} at {framerate} Hz")
+        self.virtual_display_manager.create_virtual_display(width, height, framerate)
 
     def _on_hyprland_recenter_clicked(self, *args):
         try:
@@ -525,7 +526,7 @@ class ConnectedDevice(Gtk.Box):
         for display in virtual_display_manager.displays:
             child = self.virtual_displays_by_pid.get(
                 display['pid'], 
-                VirtualDisplayRow(display['pid'], display['width'], display['height'], 60))
+                VirtualDisplayRow(display['pid'], display['width'], display['height'], display.get('framerate', 60)))
             self.top_features_group.add(child)
             new_displays_by_pid[display['pid']] = child
         

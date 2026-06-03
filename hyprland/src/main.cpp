@@ -3,6 +3,7 @@
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/helpers/Monitor.hpp>
+#include <hyprland/src/helpers/MonitorResources.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/ClearPassElement.hpp>
@@ -81,20 +82,28 @@ uint64_t g_targetRenderHits = 0;
 uint64_t g_virtualRenderHits = 0;
 uint64_t g_virtualCacheHits = 0;
 uint64_t g_virtualTextureRenderHits = 0;
-SP<CTexture> g_virtualMonitorTexture;
+uint64_t g_mirrorSaveChecks = 0;
+SP<Render::ITexture> g_virtualMonitorTexture;
 Vector2D g_virtualMonitorTextureSize;
 std::string g_fakeMirrorSourceName;
 std::string g_fakeMirrorTargetName;
 bool g_poseBaselineSet = false;
 Quat g_poseBaseline;
+bool g_previousPoseSet = false;
+Quat g_previousPose;
+int g_stillPoseFrames = 0;
 bool g_poseOffsetInitialized = false;
 PoseOffset g_smoothedPoseOffset;
 
 constexpr double BREEZY_PI = 3.14159265358979323846;
 constexpr double DEFAULT_POSE_SMOOTHING_ALPHA = 0.45;
 constexpr double DEFAULT_POSE_MAX_STEP_RATIO = 0.35;
-constexpr double DEFAULT_POSE_NORMALIZED_DEADZONE = 0.01;
+constexpr double DEFAULT_POSE_NORMALIZED_DEADZONE = 0.03;
 constexpr double DEFAULT_POSE_NORMALIZED_LIMIT = 6.0;
+constexpr double DEFAULT_DRIFT_CORRECTION_ALPHA = 0.001;
+constexpr double DEFAULT_DRIFT_STILLNESS_RADIANS = 0.002;
+constexpr double DEFAULT_DRIFT_CORRECTION_ZONE = 0.25;
+constexpr int DRIFT_STILL_FRAMES_REQUIRED = 30;
 constexpr double DEFAULT_XR_SCREEN_SCALE = 0.95;
 constexpr double XR_CENTERED_THRESHOLD = 0.35;
 constexpr const char* RECENTER_DISPATCHER = "breezy_recenter";
@@ -104,8 +113,11 @@ constexpr const char* CONFIG_SMOOTHING_ALPHA = "plugin:breezy:smoothing_alpha";
 constexpr const char* CONFIG_MAX_STEP_RATIO = "plugin:breezy:max_step_ratio";
 constexpr const char* CONFIG_DEADZONE = "plugin:breezy:deadzone";
 constexpr const char* CONFIG_MOVEMENT_LIMIT = "plugin:breezy:movement_limit";
+constexpr const char* CONFIG_DRIFT_CORRECTION_ALPHA = "plugin:breezy:drift_correction_alpha";
+constexpr const char* CONFIG_DRIFT_STILLNESS_RADIANS = "plugin:breezy:drift_stillness_radians";
+constexpr const char* CONFIG_DRIFT_CORRECTION_ZONE = "plugin:breezy:drift_correction_zone";
 
-using RenderMonitorFn = void (*)(CHyprRenderer*, PHLMONITOR, bool);
+using RenderMonitorFn = void (*)(Render::IHyprRenderer*, PHLMONITOR, bool);
 
 void notify(const std::string& message, const CHyprColor& color, uint64_t timeMs = 4000) {
     HyprlandAPI::addNotification(PHANDLE, message, color, timeMs);
@@ -123,6 +135,9 @@ void logDebug(const std::string& message) {
 void resetPoseFilter() {
     g_poseBaselineSet = false;
     g_poseBaseline = {};
+    g_previousPoseSet = false;
+    g_previousPose = {};
+    g_stillPoseFrames = 0;
     g_poseOffsetInitialized = false;
     g_smoothedPoseOffset = {};
 }
@@ -138,6 +153,35 @@ Quat quatMultiply(const Quat& a, const Quat& b) {
         .z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
         .w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
     };
+}
+
+Quat quatNormalize(const Quat& q) {
+    const double length = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (length <= 0.0)
+        return {};
+
+    return {.x = q.x / length, .y = q.y / length, .z = q.z / length, .w = q.w / length};
+}
+
+double quatDot(const Quat& a, const Quat& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+double quatAngularDistance(const Quat& a, const Quat& b) {
+    const double dot = std::clamp(std::abs(quatDot(a, b)), 0.0, 1.0);
+    return 2.0 * std::acos(dot);
+}
+
+Quat quatNlerp(const Quat& from, Quat to, const double alpha) {
+    if (quatDot(from, to) < 0.0)
+        to = {.x = -to.x, .y = -to.y, .z = -to.z, .w = -to.w};
+
+    return quatNormalize({
+        .x = from.x + (to.x - from.x) * alpha,
+        .y = from.y + (to.y - from.y) * alpha,
+        .z = from.z + (to.z - from.z) * alpha,
+        .w = from.w + (to.w - from.w) * alpha,
+    });
 }
 
 Vec3 rotateVector(const Vec3& v, const Quat& q) {
@@ -163,6 +207,9 @@ void addConfigValues() {
     HyprlandAPI::addConfigValue(PHANDLE, CONFIG_MAX_STEP_RATIO, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_POSE_MAX_STEP_RATIO)));
     HyprlandAPI::addConfigValue(PHANDLE, CONFIG_DEADZONE, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_POSE_NORMALIZED_DEADZONE)));
     HyprlandAPI::addConfigValue(PHANDLE, CONFIG_MOVEMENT_LIMIT, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_POSE_NORMALIZED_LIMIT)));
+    HyprlandAPI::addConfigValue(PHANDLE, CONFIG_DRIFT_CORRECTION_ALPHA, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_DRIFT_CORRECTION_ALPHA)));
+    HyprlandAPI::addConfigValue(PHANDLE, CONFIG_DRIFT_STILLNESS_RADIANS, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_DRIFT_STILLNESS_RADIANS)));
+    HyprlandAPI::addConfigValue(PHANDLE, CONFIG_DRIFT_CORRECTION_ZONE, Hyprlang::CConfigValue(static_cast<Hyprlang::FLOAT>(DEFAULT_DRIFT_CORRECTION_ZONE)));
 }
 
 PoseOffset clampPoseStep(const PoseOffset& previous, const PoseOffset& next, const CBox& box) {
@@ -199,6 +246,42 @@ double applyDeadzone(double value) {
 bool monitorRefMatchesName(const PHLMONITORREF& ref, const std::string& name) {
     const auto monitor = ref.lock();
     return monitor && monitor->m_name == name;
+}
+
+PoseOffset normalizedOffsetForPose(const Quat& current, const Quat& baseline, const double horizontalHalfTangent, const double verticalHalfTangent) {
+    const Quat relative = quatMultiply(quatConjugate(current), baseline);
+    const Vec3 anchorDirection = rotateVector({.x = 0.0, .y = 0.0, .z = -1.0}, relative);
+    const double depth = std::max(-anchorDirection.z, 0.001);
+    const double movementLimit = configFloat(CONFIG_MOVEMENT_LIMIT, DEFAULT_POSE_NORMALIZED_LIMIT);
+
+    return {
+        .x = std::clamp((anchorDirection.x / depth) / horizontalHalfTangent, -movementLimit, movementLimit),
+        .y = std::clamp((anchorDirection.y / depth) / verticalHalfTangent, -movementLimit, movementLimit),
+    };
+}
+
+void updateDriftCorrection(const Quat& current, const PoseOffset& normalizedOffset) {
+    if (g_previousPoseSet) {
+        const double angularStep = quatAngularDistance(current, g_previousPose);
+        if (angularStep <= configFloat(CONFIG_DRIFT_STILLNESS_RADIANS, DEFAULT_DRIFT_STILLNESS_RADIANS))
+            g_stillPoseFrames = std::min(g_stillPoseFrames + 1, DRIFT_STILL_FRAMES_REQUIRED);
+        else
+            g_stillPoseFrames = 0;
+    }
+
+    g_previousPose = current;
+    g_previousPoseSet = true;
+
+    const double correctionZone = configFloat(CONFIG_DRIFT_CORRECTION_ZONE, DEFAULT_DRIFT_CORRECTION_ZONE);
+    const bool nearCenter = std::abs(normalizedOffset.x) <= correctionZone && std::abs(normalizedOffset.y) <= correctionZone;
+    if (g_stillPoseFrames < DRIFT_STILL_FRAMES_REQUIRED || !nearCenter)
+        return;
+
+    const double alpha = std::clamp(configFloat(CONFIG_DRIFT_CORRECTION_ALPHA, DEFAULT_DRIFT_CORRECTION_ALPHA), 0.0, 1.0);
+    if (alpha <= 0.0)
+        return;
+
+    g_poseBaseline = quatNlerp(g_poseBaseline, current, alpha);
 }
 
 void removeFakeMirrorCapture() {
@@ -243,11 +326,15 @@ void ensureFakeMirrorCapture() {
         if (monitorRefMatchesName(mirror, target->m_name)) {
             g_fakeMirrorSourceName = source->m_name;
             g_fakeMirrorTargetName = target->m_name;
+            if (const auto resources = source->resources(); resources)
+                resources->enableMirror();
             return;
         }
     }
 
     source->m_mirrors.emplace_back(target->m_self);
+    if (const auto resources = source->resources(); resources)
+        resources->enableMirror();
     g_fakeMirrorSourceName = source->m_name;
     g_fakeMirrorTargetName = target->m_name;
     logDebug("added fake mirror capture source=" + source->m_name + " target=" + target->m_name);
@@ -267,31 +354,30 @@ PoseOffset currentPoseOffset(PHLMONITOR target, PHLMONITOR source, const CBox& b
         return g_poseOffsetInitialized ? g_smoothedPoseOffset : PoseOffset{};
 
     const auto* q = pose->orientationNwu;
-    const Quat current{
+    const Quat current = quatNormalize({
         .x = -q[1],
         .y = q[2],
         .z = -q[0],
         .w = q[3],
-    };
+    });
 
     if (!g_poseBaselineSet) {
         g_poseBaselineSet = true;
         g_poseBaseline = current;
     }
 
-    const Quat relative = quatMultiply(quatConjugate(current), g_poseBaseline);
-    const Vec3 anchorDirection = rotateVector({.x = 0.0, .y = 0.0, .z = -1.0}, relative);
-
     const double diagonalFovRadians = std::clamp(static_cast<double>(pose->diagonalFov), 1.0, 179.0) * BREEZY_PI / 180.0;
     const double aspect = source->m_transformedSize.x / source->m_transformedSize.y;
     const double diagonalHalfTangent = std::tan(diagonalFovRadians / 2.0);
     const double verticalHalfTangent = diagonalHalfTangent / std::sqrt((aspect * aspect) + 1.0);
     const double horizontalHalfTangent = verticalHalfTangent * aspect;
-    const double depth = std::max(-anchorDirection.z, 0.001);
 
-    const double movementLimit = configFloat(CONFIG_MOVEMENT_LIMIT, DEFAULT_POSE_NORMALIZED_LIMIT);
-    const double normalizedX = applyDeadzone(std::clamp((anchorDirection.x / depth) / horizontalHalfTangent, -movementLimit, movementLimit));
-    const double normalizedY = applyDeadzone(std::clamp((anchorDirection.y / depth) / verticalHalfTangent, -movementLimit, movementLimit));
+    auto normalizedOffset = normalizedOffsetForPose(current, g_poseBaseline, horizontalHalfTangent, verticalHalfTangent);
+    updateDriftCorrection(current, normalizedOffset);
+    normalizedOffset = normalizedOffsetForPose(current, g_poseBaseline, horizontalHalfTangent, verticalHalfTangent);
+
+    const double normalizedX = applyDeadzone(normalizedOffset.x);
+    const double normalizedY = applyDeadzone(normalizedOffset.y);
 
     (void)target;
     const PoseOffset targetOffset{
@@ -518,10 +604,33 @@ void recenterPose(const bool showNotification = true) {
 
 void cacheVirtualMonitorTexture() {
     auto monitor = g_currentRenderMonitor.lock();
-    if (!isVirtualRenderMonitor(monitor) || !g_pHyprOpenGL)
+    if (!isVirtualRenderMonitor(monitor) || !g_pHyprRenderer)
         return;
 
-    auto textureFromFramebuffer = [](CFramebuffer* fb) -> SP<CTexture> {
+    const auto resources = monitor->resources();
+    const auto glBackend = g_pHyprRenderer->glBackend().lock();
+    const bool needsCopy = monitor->needsACopyFB();
+    if (needsCopy && resources && !resources->hasMirrorFB())
+        resources->mirrorFB();
+    g_mirrorSaveChecks++;
+    if (g_mirrorSaveChecks % 60 == 1)
+        logDebug(
+            "mirror save check count=" + std::to_string(g_mirrorSaveChecks) +
+            " needsCopy=" + std::to_string(needsCopy) +
+            " glBackend=" + std::to_string(static_cast<bool>(glBackend)) +
+            " hasMirrorFB=" + std::to_string(resources && resources->hasMirrorFB()) +
+            " hasMirrorTexture=" + std::to_string(resources && resources->m_mirrorTex && resources->m_mirrorTex->m_texID != 0));
+    if (needsCopy && glBackend) {
+        const CBox monitorBox{0, 0, monitor->m_transformedSize.x, monitor->m_transformedSize.y};
+        glBackend->saveBufferForMirror(monitorBox);
+        if (g_mirrorSaveChecks % 60 == 1)
+            logDebug(
+                "mirror save after count=" + std::to_string(g_mirrorSaveChecks) +
+                " hasMirrorFB=" + std::to_string(resources && resources->hasMirrorFB()) +
+                " hasMirrorTexture=" + std::to_string(resources && resources->m_mirrorTex && resources->m_mirrorTex->m_texID != 0));
+    }
+
+    auto textureFromFramebuffer = [](const SP<Render::IFramebuffer>& fb) -> SP<Render::ITexture> {
         if (!fb || !fb->isAllocated())
             return nullptr;
 
@@ -532,23 +641,26 @@ void cacheVirtualMonitorTexture() {
         return texture;
     };
 
-    auto& monitorRenderData = g_pHyprOpenGL->m_monitorRenderResources[monitor];
-    const auto mirrorTexture = textureFromFramebuffer(&monitorRenderData.monitorMirrorFB);
-    const auto currentTexture = textureFromFramebuffer(g_pHyprOpenGL->m_renderData.currentFB);
-    const auto mainTexture = textureFromFramebuffer(g_pHyprOpenGL->m_renderData.mainFB);
-    const auto outTexture = textureFromFramebuffer(g_pHyprOpenGL->m_renderData.outFB);
-    auto texture = mirrorTexture ? mirrorTexture : (currentTexture ? currentTexture : (mainTexture ? mainTexture : outTexture));
+    const auto mirrorFB = resources && resources->hasMirrorFB() ? resources->mirrorFB() : nullptr;
+    auto texture = resources ? resources->getMirrorTexture() : nullptr;
+    if (!texture)
+        texture = textureFromFramebuffer(mirrorFB);
     if (!texture) {
         if (g_virtualCacheHits % 60 == 0) {
-            auto sizeOf = [](CFramebuffer* fb) {
+            auto sizeOf = [](const SP<Render::IFramebuffer>& fb) {
                 if (!fb)
                     return std::string("null");
                 return std::to_string(static_cast<int>(fb->m_size.x)) + "x" + std::to_string(static_cast<int>(fb->m_size.y));
             };
+            const bool hasMirrorFB = resources && resources->hasMirrorFB();
+            const bool hasMirrorTexture = resources && resources->m_mirrorTex && resources->m_mirrorTex->m_texID != 0;
             logDebug(
-                "virtual texture unavailable current=" + sizeOf(g_pHyprOpenGL->m_renderData.currentFB) +
-                " main=" + sizeOf(g_pHyprOpenGL->m_renderData.mainFB) +
-                " out=" + sizeOf(g_pHyprOpenGL->m_renderData.outFB));
+                "virtual mirror texture unavailable hasMirrorFB=" + std::to_string(hasMirrorFB) +
+                " hasMirrorTexture=" + std::to_string(hasMirrorTexture) +
+                " mirror=" + sizeOf(mirrorFB) +
+                " current=" + sizeOf(g_pHyprRenderer->m_renderData.currentFB) +
+                " main=" + sizeOf(g_pHyprRenderer->m_renderData.mainFB) +
+                " out=" + sizeOf(g_pHyprRenderer->m_renderData.outFB));
         }
         return;
     }
@@ -556,14 +668,8 @@ void cacheVirtualMonitorTexture() {
     g_virtualMonitorTexture = texture;
     if (texture->m_size.x > 0 && texture->m_size.y > 0)
         g_virtualMonitorTextureSize = texture->m_size;
-    else if (mirrorTexture)
-        g_virtualMonitorTextureSize = monitorRenderData.monitorMirrorFB.m_size;
-    else if (currentTexture)
-        g_virtualMonitorTextureSize = g_pHyprOpenGL->m_renderData.currentFB->m_size;
-    else if (mainTexture)
-        g_virtualMonitorTextureSize = g_pHyprOpenGL->m_renderData.mainFB->m_size;
-    else
-        g_virtualMonitorTextureSize = g_pHyprOpenGL->m_renderData.outFB->m_size;
+    else if (mirrorFB)
+        g_virtualMonitorTextureSize = mirrorFB->m_size;
     g_virtualCacheHits++;
     if (g_virtualCacheHits % 60 == 1)
         logDebug(
@@ -571,6 +677,7 @@ void cacheVirtualMonitorTexture() {
             " tex=" + std::to_string(g_virtualMonitorTexture->m_texID) +
             " size=" + std::to_string(static_cast<int>(g_virtualMonitorTextureSize.x)) +
             "x" + std::to_string(static_cast<int>(g_virtualMonitorTextureSize.y)));
+    scheduleActiveXrFrames();
 }
 
 void renderVirtualMonitorTexture() {
@@ -579,12 +686,7 @@ void renderVirtualMonitorTexture() {
         return;
 
     const auto mirrored = g_pCompositor ? g_pCompositor->getMonitorFromName(g_session.virtualMonitorName) : nullptr;
-    if (!mirrored || !g_pHyprOpenGL)
-        return;
-
-    auto& monitorRenderData = g_pHyprOpenGL->m_monitorRenderResources[mirrored];
-    auto* mirrorFB = &monitorRenderData.monitorMirrorFB;
-    if (!mirrorFB->isAllocated() || !mirrorFB->getTexture())
+    if (!mirrored)
         return;
 
     g_virtualTextureRenderHits++;
@@ -602,19 +704,15 @@ void renderVirtualMonitorTexture() {
     box.x += offset.x;
     box.y -= offset.y;
 
-    const double backgroundAlpha = xrDesktopCenteredInView(monitor, box) ? 1.0 : 0.0;
-    g_pHyprRenderer->m_renderPass.add(Hyprutils::Memory::makeUnique<CClearPassElement>(CClearPassElement::SClearData{CHyprColor(0, 0, 0, backgroundAlpha)}));
+    g_pHyprRenderer->m_renderPass.add(Hyprutils::Memory::makeUnique<CClearPassElement>(CClearPassElement::SClearData{CHyprColor(0, 0, 0, 1.0)}));
 
     CTexPassElement::SRenderData data;
-    data.tex = mirrorFB->getTexture();
+    data.tex = g_virtualMonitorTexture;
+    data.tex->setTexParameter(GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    data.tex->setTexParameter(GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     data.box = box;
     data.a = 1.0F;
     data.damage = CRegion(box);
-    data.replaceProjection = Mat3x3::identity()
-                                 .translate(monitor->m_pixelSize / 2.0)
-                                 .transform(Math::wlTransformToHyprutils(monitor->m_transform))
-                                 .transform(Math::wlTransformToHyprutils(Math::invertTransform(mirrored->m_transform)))
-                                 .translate(-monitor->m_transformedSize / 2.0);
 
     g_pHyprRenderer->m_renderPass.add(Hyprutils::Memory::makeUnique<CTexPassElement>(std::move(data)));
     scheduleActiveXrFrames(monitor, mirrored);
@@ -630,7 +728,7 @@ void handleRenderStage(eRenderStage stage) {
         g_currentRenderMonitor.reset();
 }
 
-void hkRenderMonitor(CHyprRenderer* renderer, PHLMONITOR monitor, bool commit) {
+void hkRenderMonitor(Render::IHyprRenderer* renderer, PHLMONITOR monitor, bool commit) {
     g_currentRenderMonitor = monitor;
     noteTargetRenderMonitor(monitor);
     if (isTargetRenderMonitor(monitor)) {
@@ -640,12 +738,41 @@ void hkRenderMonitor(CHyprRenderer* renderer, PHLMONITOR monitor, bool commit) {
     }
     if (isVirtualRenderMonitor(monitor)) {
         g_virtualRenderHits++;
-        if (g_virtualRenderHits % 60 == 1)
-            logDebug("virtual render hit count=" + std::to_string(g_virtualRenderHits) + " monitor=" + monitor->m_name);
+        if (g_virtualRenderHits % 60 == 1) {
+            const auto resources = monitor->resources();
+            logDebug(
+                "virtual render hit count=" + std::to_string(g_virtualRenderHits) +
+                " monitor=" + monitor->m_name +
+                " mirrors=" + std::to_string(monitor->m_mirrors.size()) +
+                " needsCopy=" + std::to_string(monitor->needsACopyFB()) +
+                " hasMirrorFB=" + std::to_string(resources && resources->hasMirrorFB()));
+        }
     }
 
     const auto original = reinterpret_cast<RenderMonitorFn>(g_renderMonitorHook->m_original);
+    if (isVirtualRenderMonitor(monitor)) {
+        ensureFakeMirrorCapture();
+        if (g_virtualRenderHits % 60 == 1) {
+            const auto resources = monitor->resources();
+            logDebug(
+                "virtual before original mirrors=" + std::to_string(monitor->m_mirrors.size()) +
+                " needsCopy=" + std::to_string(monitor->needsACopyFB()) +
+                " hasMirrorFB=" + std::to_string(resources && resources->hasMirrorFB()));
+        }
+    }
+
     original(renderer, monitor, commit);
+
+    if (isVirtualRenderMonitor(monitor)) {
+        if (g_virtualRenderHits % 60 == 1) {
+            const auto resources = monitor->resources();
+            logDebug(
+                "virtual after original mirrors=" + std::to_string(monitor->m_mirrors.size()) +
+                " needsCopy=" + std::to_string(monitor->needsACopyFB()) +
+                " hasMirrorFB=" + std::to_string(resources && resources->hasMirrorFB()));
+        }
+        cacheVirtualMonitorTexture();
+    }
 
     g_currentRenderMonitor.reset();
 }
@@ -660,7 +787,7 @@ void startRenderHooks() {
 
     g_renderMonitorHook = HyprlandAPI::createFunctionHook(
         PHANDLE,
-        reinterpret_cast<void*>(&CHyprRenderer::renderMonitor),
+        reinterpret_cast<void*>(&Render::IHyprRenderer::renderMonitor),
         reinterpret_cast<void*>(&hkRenderMonitor));
     if (g_renderMonitorHook)
         g_renderMonitorHook->hook();
