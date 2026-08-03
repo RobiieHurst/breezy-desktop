@@ -8,6 +8,9 @@
 
 ## What is this?
 
+> [!TIP]
+> Interested in an XR desktop for **Windows**, **MacOS**, or **Android**? Star the work-in-progress [Breezy Box](https://github.com/wheaney/breezy-box) project ([watch the demo](https://youtu.be/AwEQXnabRxE)).
+
 This repo contains a collection of tools to enable virtual desktop environments for gaming and productivity on Linux using [supported XR glasses](https://github.com/wheaney/XRLinuxDriver#supported-devices).
 
 There are two installations available. **Note: Don't manually install either of these if you're running the Decky plugin on the same machine, as they invalidate each other's installations. This is only temporary.**
@@ -16,7 +19,7 @@ There are two installations available. **Note: Don't manually install either of 
 
 ## Breezy Desktop
 
-Breezy Desktop is a virtual workspace solution for Linux desktops that use the KDE Plasma 6 or GNOME desktop environments (versions 42 through 49). It supports launching multiple virtual monitors alongside multiple physical monitors.
+Breezy Desktop is a virtual workspace solution for Linux desktops that use the KDE Plasma 6 or GNOME desktop environments (versions 45 through 50). It supports launching multiple virtual monitors alongside multiple physical monitors.
 
 For the best performance, ensure you have the latest graphics drivers installed for your distro.
 
@@ -64,7 +67,7 @@ After setup, you'll have an application called `Breezy Desktop` installed. Launc
 
 ### GNOME Setup
 
-Breezy Desktop has best compatibility with GNOME versions 45 through 49.
+Breezy Desktop has best compatibility with GNOME versions 45 through 50.
 
 **IMPORTANT** - Please read carefully through this list before you get started
 * **Make sure your glasses are in the [supported devices list](https://github.com/wheaney/XRLinuxDriver#supported-devices)** and are on the latest firmware.
@@ -93,8 +96,6 @@ Breezy GNOME is in AUR. To install, run these commands from a terminal with your
 #### Breezy GNOME Usage
 
 After setup, you'll have an application called `Breezy Desktop` installed. Launch that and follow any instructions. You will need to log out and back in at least once to get the GNOME extension working. You can also configure keyboard shortcuts for the most common toggle actions. The Breezy Desktop app doesn't have to be running to use the virtual desktop or the keyboard shortcuts once you've configured everything to your liking.
-
-For a double-wide screen, enable "widescreen mode" using the toggle in the Breezy Desktop application. **Note: this can be significantly more resource intensive than non-widescreen, you may notice performance dips on older hardware.**
 
 ### Breezy Desktop Pricing
 
